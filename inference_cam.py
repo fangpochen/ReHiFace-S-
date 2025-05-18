@@ -6,21 +6,26 @@ import numpy as np
 # close onnxruntime warning
 import onnxruntime
 onnxruntime.set_default_logger_severity(3)
+import os
+from face_feature.hifi_image_api import HifiImage
+from options.hifi_test_options import HifiTestOptions
 
 
 class GenInput(Process):
-    def __init__(self, feature_src_list_, frame_queue_in_, frame_queue_out_):
+    def __init__(self, feature_src_list_, frame_queue_in_, frame_queue_out_, src_img_path):
         super().__init__()
         self.frame_queue_in = frame_queue_in_
         self.frame_queue_out = frame_queue_out_
         self.feature_src_list = feature_src_list_
+        self.src_img_path = src_img_path
+        self.hi = HifiImage(crop_size=256)
 
     def run(self):
-        with open('data/image_feature_dict.pkl', 'rb') as f:
-            image_feature_src_dict = pickle.load(f)
-
-        print(len(image_feature_src_dict))
-        self.feature_src_list.append([image_feature_src_dict['1']])
+        # 从图片直接提取特征
+        src_latent, crop_face = self.hi.get_face_feature(self.src_img_path)
+        human_feature = [src_latent, crop_face]
+        self.feature_src_list.append([human_feature])
+        print(f"已加载人脸特征: {self.src_img_path}")
 
         cap = cv2.VideoCapture(0)  # 640 480  1280 720  1920 1080
         cap.set(3, 1920)
@@ -36,10 +41,13 @@ class GenInput(Process):
             self.frame_queue_in.put(frame)
 
             count += 1
-            if count % 500 == 0:
-                self.feature_src_list.append([image_feature_src_dict['{}'.format(1 + index)],
-                                              image_feature_src_dict['{}'.format(10 + index)]])
-                print('change src face')
+            # 每500帧换一次脸（如果有多张照片）
+            if count % 500 == 0 and os.path.exists(self.src_img_path.replace(".jpg", f"_{index+1}.jpg")):
+                next_face_path = self.src_img_path.replace(".jpg", f"_{index+1}.jpg")
+                src_latent, crop_face = self.hi.get_face_feature(next_face_path)
+                human_feature = [src_latent, crop_face]
+                self.feature_src_list.append([human_feature])
+                print(f'更换人脸: {next_face_path}')
                 index += 1
             if count % 5000 == 0:
                 # 退出条件
@@ -91,14 +99,28 @@ class FaceSwap(Process):
 
 
 if __name__ == '__main__':
+    # 使用与inference.py相同的参数解析方式
+    opt = HifiTestOptions().parse()
+    
+    src_img_path = opt.src_img_path
+    model_name = opt.model_name
+    
+    if not os.path.exists(src_img_path):
+        print(f"错误：找不到人脸图片 {src_img_path}")
+        print("请使用 --src_img_path 指定正确的人脸图片路径")
+        exit(1)
+    
+    print(f"使用人脸图片: {src_img_path}")
+    print(f"使用模型: {model_name}")
+    
     frame_queue_in = Queue(2)
     frame_queue_out = Queue(2)
     manager = Manager()
     image_feature_src_list = manager.list()
 
-    gi = GenInput(image_feature_src_list, frame_queue_in, frame_queue_out)
+    gi = GenInput(image_feature_src_list, frame_queue_in, frame_queue_out, src_img_path)
     go = GetOutput(frame_queue_out)
-    fs = FaceSwap(image_feature_src_list, frame_queue_in, frame_queue_out, model_name='er8_bs1')
+    fs = FaceSwap(image_feature_src_list, frame_queue_in, frame_queue_out, model_name=model_name)
 
     gi.start()
     go.start()
